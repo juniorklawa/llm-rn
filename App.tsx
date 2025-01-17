@@ -36,19 +36,16 @@ export default function App() {
       setModel(loadedModel);
 
       setStatus("Initializing database...");
-      const database = new DatabaseService();
+      const database = new DatabaseService(loadedModel);
       await database.open();
 
       // Add test data
       setStatus("Adding test data...");
       await database.populateTestData();
 
-      // Test some searches
-      // await database.testSimilaritySearch(
-      //   "artificial intelligence and machine learning"
-      // );
-      // await database.testSimilaritySearch("cooking and food recipes");
-      // await database.testSimilaritySearch("nature and environment");
+      // Run demonstration
+      setStatus("Running similarity search demonstration...");
+      await database.demonstrateExpectedMatches();
 
       setDb(database);
 
@@ -64,21 +61,8 @@ export default function App() {
     if (!inputText.trim() || !model || !db) return;
 
     try {
-      setStatus("Generating embedding...");
-      const embeddings = await model.embed([inputText]);
-      const embedding = await embeddings.array();
-      console.log("Generated store embedding:", {
-        text: inputText,
-        embeddingLength: embedding[0].length,
-      });
-
-      setStatus("Storing in database...");
-      const id = await db.storeEmbedding(
-        inputText,
-        new Float32Array(embedding[0]),
-        { timestamp: Date.now() }
-      );
-
+      setStatus("Storing text...");
+      const id = await db.storeEmbedding(inputText);
       setStatus(`Stored with ID: ${id}`);
       setInputText("");
     } catch (error) {
@@ -87,27 +71,14 @@ export default function App() {
     }
   };
 
-  const searchSimilar = async () => {
-    if (!searchText.trim() || !model || !db) return;
+  const searchTexts = async () => {
+    if (!searchText.trim() || !db) return;
 
     try {
-      setStatus("Generating search embedding...");
-      const embeddings = await model.embed([searchText]);
-      const embedding = await embeddings.array();
-      console.log("Generated search embedding:", {
-        text: searchText,
-        embeddingLength: embedding[0].length,
-      });
-
       setStatus("Searching...");
-      const searchResults = await db.searchSimilar(
-        new Float32Array(embedding[0]),
-        5,
-        0.1
-      );
-
+      const searchResults = await db.searchSimilar(searchText, 5);
       setResults(searchResults);
-      setStatus(`Found ${searchResults.length} results`);
+      setStatus("Search complete");
     } catch (error) {
       setStatus(`Error searching: ${error.message}`);
       console.error("Search error:", error);
@@ -147,7 +118,7 @@ export default function App() {
         />
         <Button
           title="Search"
-          onPress={searchSimilar}
+          onPress={searchTexts}
           disabled={!isReady || !searchText.trim()}
         />
       </View>
@@ -159,7 +130,8 @@ export default function App() {
               {index + 1}. {result.content}
             </Text>
             <Text style={styles.similarity}>
-              Similarity: {(result.similarity * 100).toFixed(1)}%
+              Similarity: {result.similarity.toFixed(1)}% ({result.matchQuality}
+              )
             </Text>
           </View>
         ))}

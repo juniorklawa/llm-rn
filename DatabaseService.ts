@@ -1,9 +1,28 @@
 import { open } from "@op-engineering/op-sqlite";
 import * as Crypto from "expo-crypto";
+import * as use from "@tensorflow-models/universal-sentence-encoder";
 
 export class DatabaseService {
   private db: any;
+  private model: use.UniversalSentenceEncoder | null = null;
   private readonly vectorDimension = 512;
+
+  constructor(model?: use.UniversalSentenceEncoder) {
+    this.model = model || null;
+  }
+
+  setModel(model: use.UniversalSentenceEncoder) {
+    this.model = model;
+  }
+
+  private async generateEmbedding(text: string): Promise<Float32Array> {
+    if (!this.model) {
+      throw new Error("Universal Sentence Encoder model not initialized");
+    }
+    const embeddings = await this.model.embed([text]);
+    const embedding = await embeddings.array();
+    return new Float32Array(embedding[0]);
+  }
 
   async open() {
     try {
@@ -26,21 +45,13 @@ export class DatabaseService {
       `);
       console.log("Created table successfully");
 
-      // Create vector index
+      // Create vector index with improved parameters
       await this.db.execute(`
         CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings(
-          libsql_vector_idx(embedding, 'compress_neighbors=float8', 'max_neighbors=50')
+          libsql_vector_idx(embedding, 'compress_neighbors=float8', 'max_neighbors=100')
         );
       `);
       console.log("Created vector index successfully");
-
-      // Test the table with a simple vector
-      const testVector = new Float32Array(this.vectorDimension).fill(0.1);
-      await this.db.execute(
-        "INSERT INTO embeddings(uuid, content, embedding) VALUES (?, ?, vector(?))",
-        [await this.generateUUID(), "test", this.toVector(testVector)]
-      );
-      console.log("Successfully inserted test vector");
     } catch (error) {
       console.error("Error in open():", error);
       throw error;
@@ -52,24 +63,32 @@ export class DatabaseService {
   }
 
   private toVector(embedding: Float32Array): string {
-    return `[${Array.from(embedding).join(", ")}]`;
+    try {
+      // Ensure we're working with valid numbers
+      const validNumbers = Array.from(embedding).map((n) =>
+        Number.isFinite(n) ? n : 0
+      );
+      return `[${validNumbers.join(",")}]`;
+    } catch (error) {
+      console.error("Error converting embedding to vector string:", error);
+      throw new Error("Failed to convert embedding to vector string");
+    }
   }
 
-  async storeEmbedding(
-    content: string,
-    embedding: Float32Array,
-    metadata?: any
-  ) {
+  async storeEmbedding(content: string, embedding?: Float32Array) {
     try {
+      const vectorEmbedding =
+        embedding || (await this.generateEmbedding(content));
+
       console.log("Storing embedding:", {
         content,
-        embeddingLength: embedding.length,
+        embeddingLength: vectorEmbedding.length,
       });
 
       const uuid = await this.generateUUID();
       const result = await this.db.execute(
         "INSERT INTO embeddings(uuid, content, embedding) VALUES (?, ?, vector(?))",
-        [uuid, content, this.toVector(embedding)]
+        [uuid, content, this.toVector(vectorEmbedding)]
       );
       return uuid;
     } catch (error) {
@@ -78,86 +97,95 @@ export class DatabaseService {
     }
   }
 
-  async searchSimilar(queryEmbedding: Float32Array, limit: number = 10) {
+  async searchSimilar(queryText: string, k: number = 10) {
     try {
+      const queryEmbedding = await this.generateEmbedding(queryText);
       console.log("Searching with embedding length:", queryEmbedding.length);
 
       const querySql = `
-        WITH vector_matches AS (
-          SELECT e.uuid, e.content, vector_distance_cos(e.embedding, vector(?)) as distance
-          FROM vector_top_k('idx_embeddings_vector', vector(?), ?) vt
-          JOIN embeddings e ON e.rowid = vt.id
-        )
         SELECT 
           uuid,
           content,
-          distance,
-          CASE 
-            WHEN distance <= 0.1 THEN 'Very High'
-            WHEN distance <= 0.3 THEN 'High'
-            WHEN distance <= 0.5 THEN 'Medium'
-            WHEN distance <= 0.7 THEN 'Low'
-            ELSE 'Very Low'
-          END as match_quality
-        FROM vector_matches
-        ORDER BY distance ASC;
+          vector_distance_cos(embedding, vector(?)) as cos_distance
+        FROM embeddings
+        ORDER BY cos_distance ASC
+        LIMIT ?;
       `;
 
       const vectorStr = this.toVector(queryEmbedding);
-      const results = await this.db.execute(querySql, [
-        vectorStr,
-        vectorStr,
-        limit,
-      ]);
+      console.log("Vector string length:", vectorStr.length);
 
-      return results.rows.map((row: any) => ({
-        content: row.content,
-        similarity: 1 - row.distance,
-        id: row.uuid,
-        matchQuality: row.match_quality,
-      }));
+      const results = await this.db.execute(querySql, [vectorStr, k]);
+
+      return results.rows.map((row: any) => {
+        const distance = row.cos_distance;
+        const similarity = Math.round((1 - distance) * 100);
+        return {
+          content: row.content,
+          similarity: similarity,
+          id: row.uuid,
+          matchQuality: this.getMatchQuality(distance),
+          distance: distance,
+        };
+      });
     } catch (error) {
       console.error("Error in searchSimilar:", error);
       throw error;
     }
   }
 
-  async close() {
-    if (this.db) {
-      await this.db.close();
-    }
+  private getMatchQuality(distance: number): string {
+    if (distance <= 0.15) return "Excellent";
+    if (distance <= 0.3) return "Very Good";
+    if (distance <= 0.45) return "Good";
+    if (distance <= 0.6) return "Fair";
+    return "Poor";
   }
 
   async populateTestData() {
+    if (!this.model) {
+      throw new Error(
+        "Cannot populate test data without Universal Sentence Encoder model"
+      );
+    }
+
     const testData = [
-      "The quick brown fox jumps over the lazy dog",
-      "Machine learning is a subset of artificial intelligence that focuses on data and algorithms",
-      "A beautiful sunset painted the sky in shades of orange and purple",
-      "The recipe calls for fresh basil, garlic, and extra virgin olive oil",
-      "Scientists discovered a new species of deep-sea creature near hydrothermal vents",
-      "The ancient ruins revealed secrets about a long-lost civilization",
-      "Electric vehicles are becoming increasingly popular as technology improves",
-      "The jazz musician improvised a mesmerizing solo on his saxophone",
-      "Climate change is affecting weather patterns around the globe",
-      "The art exhibition featured works from emerging local artists",
-      "Quantum computers could revolutionize cryptography and drug discovery",
-      "The chef's signature dish combines traditional and modern cooking techniques",
-      "Space exploration has led to numerous technological advancements",
-      "The novel tells a compelling story about friendship and redemption",
-      "Regular exercise and proper nutrition are essential for good health",
+      // Technology and AI
+      "Artificial intelligence and machine learning are transforming the technology landscape",
+      "Deep learning models have achieved remarkable success in natural language processing",
+      "Neural networks can recognize patterns in complex datasets",
+      "The future of computing lies in quantum technologies",
+
+      // Nature and Environment
+      "Climate change poses significant challenges to global ecosystems",
+      "Rainforests are crucial for maintaining Earth's biodiversity",
+      "Ocean conservation efforts protect marine life and coral reefs",
+      "Sustainable energy solutions are essential for environmental protection",
+
+      // Food and Cooking
+      "Traditional Italian cuisine emphasizes fresh, high-quality ingredients",
+      "Modern molecular gastronomy combines science and culinary arts",
+      "The art of baking requires precision and patience",
+      "Farm-to-table restaurants promote local and seasonal ingredients",
+
+      // Arts and Culture
+      "Classical music continues to inspire contemporary composers",
+      "Abstract expressionism revolutionized modern art in the 20th century",
+      "Digital art is gaining recognition in mainstream galleries",
+      "Photography captures moments that tell powerful stories",
+
+      // Science and Discovery
+      "Space exploration reveals new mysteries about our universe",
+      "Genetic research advances our understanding of human health",
+      "Neuroscience studies the complexity of the human brain",
+      "Paleontology uncovers evidence of prehistoric life",
     ];
 
     console.log("Starting to populate test data...");
 
     for (const text of testData) {
       try {
-        const embedding = new Float32Array(this.vectorDimension);
-        // Create a deterministic but varied embedding for testing
-        for (let i = 0; i < this.vectorDimension; i++) {
-          embedding[i] = Math.sin(i * text.length) * 0.5;
-        }
-
-        await this.storeEmbedding(text, embedding);
+        await this.storeEmbedding(text);
         console.log(`Stored: "${text.slice(0, 30)}..."`);
       } catch (error) {
         console.error(`Error storing test data: ${text}`, error);
@@ -167,25 +195,40 @@ export class DatabaseService {
     console.log("Finished populating test data");
   }
 
-  // Helper method to test similarity search
-  async testSimilaritySearch(queryText: string) {
-    console.log(`\nTesting similarity search for: "${queryText}"`);
+  async demonstrateExpectedMatches() {
+    const testQueries = [
+      {
+        query: "What's new in artificial intelligence and machine learning?",
+        expectedTopics: ["AI", "Deep Learning", "Neural Networks"],
+      },
+      {
+        query: "How does climate change affect biodiversity?",
+        expectedTopics: ["Climate Change", "Biodiversity", "Ecosystems"],
+      },
+      {
+        query: "Modern cooking techniques in Italian cuisine",
+        expectedTopics: ["Modern Gastronomy", "Italian Cuisine", "Cooking"],
+      },
+    ];
 
-    // Create a test embedding for the query
-    const queryEmbedding = new Float32Array(this.vectorDimension);
-    for (let i = 0; i < this.vectorDimension; i++) {
-      queryEmbedding[i] = Math.sin(i * queryText.length) * 0.5;
+    console.log("\n=== Demonstration of Expected Matches ===\n");
+
+    for (const test of testQueries) {
+      console.log(`\nQuery: "${test.query}"`);
+      console.log(`Expected topics: ${test.expectedTopics.join(", ")}`);
+      console.log("\nActual results:");
+
+      const results = await this.searchSimilar(test.query, 5);
+
+      console.log("\nSearch Results:");
+      results.forEach((result, index) => {
+        console.log(`\n${index + 1}. Content: "${result.content}"`);
+        console.log(`   Similarity: ${result.similarity.toFixed(2)}%`);
+        console.log(`   Match Quality: ${result.matchQuality}`);
+        console.log(`   Distance: ${result.distance.toFixed(4)}`);
+      });
+
+      console.log("\n-----------------------------------");
     }
-
-    const results = await this.searchSimilar(queryEmbedding, 5);
-
-    console.log("\nSearch Results:");
-    results.forEach((result, index) => {
-      console.log(`\n${index + 1}. Content: "${result.content}"`);
-      console.log(`   Similarity: ${(result.similarity * 100).toFixed(2)}%`);
-      console.log(`   Match Quality: ${result.matchQuality}`);
-    });
-
-    return results;
   }
 }
