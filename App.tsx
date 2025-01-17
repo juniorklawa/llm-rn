@@ -11,10 +11,12 @@ import {
 import * as tf from "@tensorflow/tfjs";
 import "@tensorflow/tfjs-react-native";
 import * as use from "@tensorflow-models/universal-sentence-encoder";
+import { DatabaseService } from "./DatabaseService";
 
 export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [model, setModel] = useState<any>(null);
+  const [db, setDb] = useState<DatabaseService | null>(null);
   const [inputText, setInputText] = useState("");
   const [searchText, setSearchText] = useState("");
   const [results, setResults] = useState<any[]>([]);
@@ -36,6 +38,18 @@ export default function App() {
       setStatus("Initializing database...");
       const database = new DatabaseService();
       await database.open();
+
+      // Add test data
+      setStatus("Adding test data...");
+      await database.populateTestData();
+
+      // Test some searches
+      // await database.testSimilaritySearch(
+      //   "artificial intelligence and machine learning"
+      // );
+      // await database.testSimilaritySearch("cooking and food recipes");
+      // await database.testSimilaritySearch("nature and environment");
+
       setDb(database);
 
       setStatus("Ready!");
